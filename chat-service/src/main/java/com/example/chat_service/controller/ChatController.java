@@ -1,9 +1,11 @@
-package com.example.chat_service;
+package com.example.chat_service.controller;
 
 import org.springframework.messaging.handler.annotation.MessageMapping;
 import org.springframework.messaging.handler.annotation.SendTo;
 import org.springframework.messaging.simp.SimpMessageHeaderAccessor;
 import org.springframework.stereotype.Controller;
+
+import com.example.chat_service.dto.ChatMessage;
 
 @Controller
 public class ChatController {
