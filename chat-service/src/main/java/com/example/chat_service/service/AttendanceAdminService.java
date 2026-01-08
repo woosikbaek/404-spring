@@ -12,6 +12,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -26,98 +27,120 @@ public class AttendanceAdminService {
     private final EmployeeRepository employeeRepository;
     private final SimpMessagingTemplate messagingTemplate;
 
+    /**
+     * 1. 일괄 수정 및 실시간 전송
+     */
     @Transactional
-    public Map<String, Object> updateAttendanceStatus(Long employeeId, LocalDate date, String status) {
-        Employee employee = employeeRepository.findById(employeeId)
-                .orElseThrow(() -> new RuntimeException("사원을 찾을 수 없습니다."));
+    public Map<String, Object> updateAttendanceStatusBatch(String id, String status, LocalDate startDate, LocalDate endDate) {
+        if (endDate == null) endDate = startDate;
+        List<LocalDate> dateRange = getDateRange(startDate, endDate);
+        List<Employee> targetEmployees = getTargetEmployees(id);
 
+        for (Employee employee : targetEmployees) {
+            for (LocalDate date : dateRange) {
+                processSingleUpdate(employee, date, status);
+            }
+            // 사원 한 명의 루프가 끝날 때마다 즉시 DB 반영 및 웹소켓 전송
+            attendanceRepository.flush(); 
+            refreshAndNotify(employee, startDate);
+        }
+
+        return Map.of("message", "업데이트 완료", "target", id, "appliedDays", dateRange.size());
+    }
+
+    /**
+     * 2. 일괄 삭제 및 실시간 전송
+     */
+    @Transactional
+    public Map<String, Object> deleteAttendanceBatch(String id, LocalDate startDate, LocalDate endDate) {
+        if (endDate == null) endDate = startDate;
+        List<LocalDate> dateRange = getDateRange(startDate, endDate);
+        List<Employee> targetEmployees = getTargetEmployees(id);
+
+        for (Employee employee : targetEmployees) {
+            for (LocalDate date : dateRange) {
+                processSingleDelete(employee, date);
+            }
+            // 사원 한 명의 삭제 루프가 끝날 때마다 즉시 DB 반영 및 웹소켓 전송
+            attendanceRepository.flush(); 
+            refreshAndNotify(employee, startDate);
+        }
+
+        return Map.of("message", "삭제 및 복구 완료", "target", id, "appliedDays", dateRange.size());
+    }
+
+    private void processSingleUpdate(Employee employee, LocalDate date, String status) {
         AttendanceLog logData = attendanceRepository.findByEmployeeAndWorkDate(employee, date)
                 .orElse(AttendanceLog.builder().employee(employee).workDate(date).build());
 
-        // 1. 기존 상태 복구
         if (logData.getStatus() != null) {
-            String old = logData.getStatus();
-            if (old.equals(status)) return Map.of("message", "이미 해당 상태입니다.", "employeeId", employeeId);
-            
-            if ("연차".equals(old)) employeeRepository.incrementAnnualLeave(employeeId, 1.0);
-            else if ("반차".equals(old)) employeeRepository.incrementAnnualLeave(employeeId, 0.5);
-            else if ("병가".equals(old)) employeeRepository.incrementSickLeave(employeeId);
+            if (logData.getStatus().equals(status)) return;
+            restoreLeaveBalance(employee.getId(), logData.getStatus());
         }
 
-        // 하루 풀타임 기준 시간 (8시간 = 480분)
         int fullDayMins = 480;
-        int halfDayMins = 240;
-
-        // 2. 새 상태 차감 및 일당(Wage) 계산
         switch (status) {
             case "연차":
-                if (employeeRepository.decrementAnnualLeave(employeeId, 1.0) > 0) {
-                    // 연차는 유급이므로 8시간치 일당 부여
+                if (employeeRepository.decrementAnnualLeave(employee.getId(), 1.0) > 0) {
                     setLogData(logData, "연차", fullDayMins, calculateWage(fullDayMins, employee.getHourlyRate()));
-                } else throw new RuntimeException("연차 부족");
+                } else { setLogData(logData, "연차부족", 0, 0); }
                 break;
-                
             case "반차":
-                if (employeeRepository.decrementAnnualLeave(employeeId, 0.5) > 0) {
-                    // 반차는 4시간치 일당 부여
-                    setLogData(logData, "반차", halfDayMins, calculateWage(halfDayMins, employee.getHourlyRate()));
-                } else throw new RuntimeException("연차 부족");
+                if (employeeRepository.decrementAnnualLeave(employee.getId(), 0.5) > 0) {
+                    setLogData(logData, "반차", 240, calculateWage(240, employee.getHourlyRate()));
+                } else { setLogData(logData, "연차부족", 0, 0); }
                 break;
-
             case "병가":
-                if (employeeRepository.decrementSickLeave(employeeId) > 0) {
-                    // 유급 병가: 8시간치 일당 부여
+                if (employeeRepository.decrementSickLeave(employee.getId()) > 0) {
                     setLogData(logData, "병가", fullDayMins, calculateWage(fullDayMins, employee.getHourlyRate()));
-                } else {
-                    // 병가 소진 시 무급 처리
-                    setLogData(logData, "병가(무급)", 0, 0);
-                }
+                } else { setLogData(logData, "병가(무급)", 0, 0); }
                 break;
-
+            case "휴가":
             case "정상근무":
-                setLogData(logData, "정상근무", fullDayMins, calculateWage(fullDayMins, employee.getHourlyRate()));
+                setLogData(logData, status, fullDayMins, calculateWage(fullDayMins, employee.getHourlyRate()));
                 break;
-
-            case "결근":
-            case "조퇴":
+            default:
                 setLogData(logData, status, 0, 0);
                 break;
-
-            default:
-                logData.setStatus(status);
-                break;
         }
-
-        attendanceRepository.saveAndFlush(logData);
-        
-        // 3. 최신 데이터 로드 및 월급 재계산
-        Employee updatedEmployee = employeeRepository.findById(employeeId).get();
-        long newSalary = calculateMonthlySalary(employeeId, date.getYear(), date.getMonthValue());
-        
-        // 4. 웹소켓 전송
-        sendWebSocketUpdate(employeeId, date, logData, updatedEmployee, newSalary);
-
-        return Map.of("message", "업데이트 완료", "employeeId", employeeId, "status", logData.getStatus());
+        attendanceRepository.save(logData); // saveAndFlush는 루프 밖에서 호출
     }
 
-    @Transactional
-    public Map<String, Object> cancelAttendance(Long employeeId, LocalDate date) {
-        AttendanceLog logData = attendanceRepository.findByEmployeeIdAndWorkDate(employeeId, date)
-                .orElseThrow(() -> new RuntimeException("기록 없음"));
+    private void processSingleDelete(Employee employee, LocalDate date) {
+        attendanceRepository.findByEmployeeAndWorkDate(employee, date).ifPresent(logData -> {
+            restoreLeaveBalance(employee.getId(), logData.getStatus());
+            attendanceRepository.delete(logData);
+        });
+    }
 
-        String status = logData.getStatus();
+    private void restoreLeaveBalance(Long employeeId, String status) {
         if ("연차".equals(status)) employeeRepository.incrementAnnualLeave(employeeId, 1.0);
         else if ("반차".equals(status)) employeeRepository.incrementAnnualLeave(employeeId, 0.5);
         else if ("병가".equals(status)) employeeRepository.incrementSickLeave(employeeId);
+    }
 
-        attendanceRepository.delete(logData);
-        
-        Employee updated = employeeRepository.findById(employeeId).get();
-        long newSalary = calculateMonthlySalary(employeeId, date.getYear(), date.getMonthValue());
-        
-        sendWebSocketUpdate(employeeId, date, logData, updated, newSalary);
+    private List<LocalDate> getDateRange(LocalDate start, LocalDate end) {
+        List<LocalDate> range = new ArrayList<>();
+        LocalDate current = start;
+        while (!current.isAfter(end)) {
+            range.add(current);
+            current = current.plusDays(1);
+        }
+        return range;
+    }
 
-        return Map.of("message", "취소 완료", "employeeId", employeeId);
+    private List<Employee> getTargetEmployees(String id) {
+        if ("all".equals(id)) return employeeRepository.findAll();
+        Employee emp = employeeRepository.findById(Long.parseLong(id))
+                .orElseThrow(() -> new RuntimeException("사원 없음"));
+        return List.of(emp);
+    }
+
+    private void refreshAndNotify(Employee employee, LocalDate date) {
+        // 사원 정보 다시 로드 (잔여 연차 등 업데이트 반영)
+        Employee updated = employeeRepository.findById(employee.getId()).orElse(employee);
+        long newSalary = calculateMonthlySalary(updated.getId(), date.getYear(), date.getMonthValue());
+        sendWebSocketUpdate(updated.getId(), date, updated, newSalary);
     }
 
     private void setLogData(AttendanceLog log, String status, int mins, int wage) {
@@ -130,28 +153,26 @@ public class AttendanceAdminService {
         return (int) Math.floor(mins * (hourlyRate / 60.0));
     }
 
-    private void sendWebSocketUpdate(Long employeeId, LocalDate date, AttendanceLog log, Employee employee, long salary) {
+    private void sendWebSocketUpdate(Long employeeId, LocalDate date, Employee employee, long salary) {
         LocalDate start = LocalDate.of(date.getYear(), date.getMonthValue(), 1);
-        List<AttendanceLogResponse> monthlyLogs = attendanceRepository.findByEmployeeIdAndWorkDateBetween(employeeId, start, start.withDayOfMonth(start.lengthOfMonth()))
+        List<AttendanceLogResponse> monthlyLogs = attendanceRepository.findByEmployeeIdAndWorkDateBetween(
+                employeeId, start, start.withDayOfMonth(start.lengthOfMonth()))
                 .stream().map(AttendanceLogResponse::new).collect(Collectors.toList());
 
-        Map<String, Object> p1 = new HashMap<>();
-        p1.put("type", "ADMIN_UPDATE");
-        p1.put("employeeId", employeeId);
-        p1.put("date", date.toString());
-        p1.put("status", log.getStatus());
-        p1.put("remainingLeave", employee.getAnnualLeave());
-        p1.put("remainingSickLeave", employee.getSickLeave());
-        p1.put("monthlyLogs", monthlyLogs);
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("type", "ADMIN_UPDATE");
+        payload.put("employeeId", employeeId);
+        payload.put("date", date.toString()); // 변경 기준일
+        payload.put("remainingLeave", employee.getAnnualLeave());
+        payload.put("remainingSickLeave", employee.getSickLeave());
+        payload.put("monthlyLogs", monthlyLogs);
+        payload.put("newTotalSalary", salary);
+
+        // 메시지 전송
+        this.messagingTemplate.convertAndSend("/topic/attendance/" + employeeId, (Object) payload);
+        this.messagingTemplate.convertAndSend("/topic/attendance/admin", (Object) payload);
         
-        this.messagingTemplate.convertAndSend("/topic/attendance/" + employeeId, (Object) p1);
-        this.messagingTemplate.convertAndSend("/topic/attendance/admin", (Object) p1);
-        
-        Map<String, Object> p2 = new HashMap<>();
-        p2.put("type", "SALARY_UPDATE");
-        p2.put("employeeId", employeeId);
-        p2.put("newTotalSalary", salary);
-        this.messagingTemplate.convertAndSend("/topic/attendance/admin", (Object) p2);
+        log.info("WebSocket 전송 완료 - 사원: {}, 급여: {}", employeeId, salary);
     }
 
     public long calculateMonthlySalary(Long employeeId, int year, int month) {

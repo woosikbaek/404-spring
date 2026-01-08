@@ -24,22 +24,40 @@ public class AdminAttendanceController {
     private final AttendanceLogRepository attendanceRepository;
 
     /**
-     * 1. 근태 상태 수정 (관리자용)
+     * 1. 근태 상태 일괄 수정
      */
     @PostMapping("/update")
     public ResponseEntity<?> update(@RequestBody Map<String, Object> req) {
         try {
-            Long empId = Long.valueOf(req.get("employeeId").toString());
-            LocalDate date = LocalDate.parse(req.get("date").toString());
+            String id = req.get("employeeId").toString();
             String status = req.get("status").toString();
-            return ResponseEntity.ok(adminService.updateAttendanceStatus(empId, date, status));
+            LocalDate startDate = LocalDate.parse(req.get("date").toString());
+            LocalDate endDate = req.get("endDate") != null ? LocalDate.parse(req.get("endDate").toString()) : null;
+
+            return ResponseEntity.ok(adminService.updateAttendanceStatusBatch(id, status, startDate, endDate));
         } catch (Exception e) {
             return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
         }
     }
 
     /**
-     * 2. 특정 사원의 월간 기록 조회 (달력용) - [복구됨]
+     * 2. 근태 기록 일괄 삭제
+     */
+    @DeleteMapping("/delete")
+    public ResponseEntity<?> delete(@RequestBody Map<String, Object> req) {
+        try {
+            String id = req.get("employeeId").toString();
+            LocalDate startDate = LocalDate.parse(req.get("date").toString());
+            LocalDate endDate = req.get("endDate") != null ? LocalDate.parse(req.get("endDate").toString()) : null;
+
+            return ResponseEntity.ok(adminService.deleteAttendanceBatch(id, startDate, endDate));
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    /**
+     * 3. 특정 사원 월간 조회
      */
     @GetMapping("/monthly/{employeeId}")
     public ResponseEntity<?> getMonthlyAttendance(
@@ -54,21 +72,17 @@ public class AdminAttendanceController {
             LocalDate startDate = LocalDate.of(targetYear, targetMonth, 1);
             LocalDate endDate = startDate.withDayOfMonth(startDate.lengthOfMonth());
 
-            List<AttendanceLog> monthlyLogs = attendanceRepository.findByEmployeeIdAndWorkDateBetween(
-                    employeeId, startDate, endDate);
-
-            List<AttendanceLogResponse> result = monthlyLogs.stream()
-                    .map(AttendanceLogResponse::new)
-                    .collect(Collectors.toList());
+            List<AttendanceLogResponse> result = attendanceRepository.findByEmployeeIdAndWorkDateBetween(employeeId, startDate, endDate)
+                    .stream().map(AttendanceLogResponse::new).collect(Collectors.toList());
 
             return ResponseEntity.ok(result);
         } catch (Exception e) {
-            return ResponseEntity.badRequest().body(Map.of("error", "조회 실패: " + e.getMessage()));
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
         }
     }
 
     /**
-     * 3. 전 사원 월급 요약 조회 - [복구됨]
+     * 4. 전 사원 월급 요약
      */
     @GetMapping("/salary/all-summary")
     public ResponseEntity<?> getAllEmployeesSalarySummary(
@@ -83,17 +97,11 @@ public class AdminAttendanceController {
             LocalDate end = start.withDayOfMonth(start.lengthOfMonth());
 
             List<AttendanceLog> allLogs = attendanceRepository.findByWorkDateBetween(start, end);
-
-            if (allLogs.isEmpty()) {
-                return ResponseEntity.ok(Map.of("message", "해당 기간에 데이터가 없습니다."));
-            }
-
             Map<Long, Long> salaryMap = allLogs.stream()
                     .filter(log -> log != null && log.getEmployee() != null)
                     .collect(Collectors.groupingBy(
                             log -> log.getEmployee().getId(),
-                            Collectors.summingLong(
-                                    log -> log.getDailyWage() != null ? log.getDailyWage().longValue() : 0L)));
+                            Collectors.summingLong(log -> log.getDailyWage() != null ? log.getDailyWage().longValue() : 0L)));
 
             return ResponseEntity.ok(salaryMap);
         } catch (Exception e) {
@@ -102,7 +110,7 @@ public class AdminAttendanceController {
     }
 
     /**
-     * 4. 전 사원 월간 기록 전체 조회 (관리자 리스트용)
+     * 5. 전 사원 월간 기록 전체 조회
      */
     @GetMapping("/monthly/all")
     public ResponseEntity<?> getAll(@RequestParam(required = false) Integer year, @RequestParam(required = false) Integer month) {
@@ -115,7 +123,6 @@ public class AdminAttendanceController {
             LocalDate end = start.withDayOfMonth(start.lengthOfMonth());
 
             List<AttendanceLog> logs = attendanceRepository.findByWorkDateBetween(start, end);
-            
             Map<Long, List<AttendanceLogResponse>> grouped = logs.stream()
                     .filter(l -> l.getEmployee() != null)
                     .collect(Collectors.groupingBy(
@@ -131,21 +138,7 @@ public class AdminAttendanceController {
 
             return ResponseEntity.ok(result);
         } catch (Exception e) {
-            return ResponseEntity.badRequest().body(Map.of("error", "전체 조회 실패: " + e.getMessage()));
-        }
-    }
-
-    /**
-     * 5. 근태 기록 삭제/취소
-     */
-    @DeleteMapping("/delete")
-    public ResponseEntity<?> delete(@RequestBody Map<String, Object> req) {
-        try {
-            Long empId = Long.valueOf(req.get("employeeId").toString());
-            LocalDate date = LocalDate.parse(req.get("date").toString());
-            return ResponseEntity.ok(adminService.cancelAttendance(empId, date));
-        } catch (Exception e) {
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", e.getMessage()));
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
         }
     }
 }
