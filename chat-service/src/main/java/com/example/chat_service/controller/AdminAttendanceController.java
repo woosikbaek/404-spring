@@ -24,7 +24,7 @@ public class AdminAttendanceController {
     private final AttendanceLogRepository attendanceRepository;
 
     /**
-     * 1. 근태 상태 일괄 수정
+     * 1. 근태 상태 일괄 수정 (주말 및 공휴일 자동 제외)
      */
     @PostMapping("/update")
     public ResponseEntity<?> update(@RequestBody Map<String, Object> req) {
@@ -41,7 +41,7 @@ public class AdminAttendanceController {
     }
 
     /**
-     * 2. 근태 기록 일괄 삭제
+     * 2. 근태 기록 일괄 삭제 (주말 및 공휴일 자동 제외)
      */
     @DeleteMapping("/delete")
     public ResponseEntity<?> delete(@RequestBody Map<String, Object> req) {

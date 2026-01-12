@@ -11,11 +11,9 @@ import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.DayOfWeek;
 import java.time.LocalDate;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -27,20 +25,55 @@ public class AttendanceAdminService {
     private final EmployeeRepository employeeRepository;
     private final SimpMessagingTemplate messagingTemplate;
 
+    // 2026년 한국 공휴일 리스트
+    private static final Set<LocalDate> HOLIDAYS = new HashSet<>();
+
+    static {
+        HOLIDAYS.add(LocalDate.of(2026, 1, 1));   // 신정
+        HOLIDAYS.add(LocalDate.of(2026, 2, 16));  // 설날 연휴
+        HOLIDAYS.add(LocalDate.of(2026, 2, 17));  // 설날
+        HOLIDAYS.add(LocalDate.of(2026, 2, 18));  // 설날 연휴
+        HOLIDAYS.add(LocalDate.of(2026, 3, 1));   // 삼일절
+        HOLIDAYS.add(LocalDate.of(2026, 3, 2));   // 삼일절 대체공휴일
+        HOLIDAYS.add(LocalDate.of(2026, 5, 5));   // 어린이날 / 부처님오신날
+        HOLIDAYS.add(LocalDate.of(2026, 6, 6));   // 현충일
+        HOLIDAYS.add(LocalDate.of(2026, 8, 15));  // 광복절
+        HOLIDAYS.add(LocalDate.of(2026, 8, 17));  // 광복절 대체공휴일
+        HOLIDAYS.add(LocalDate.of(2026, 9, 24));  // 추석 연휴
+        HOLIDAYS.add(LocalDate.of(2026, 9, 25));  // 추석
+        HOLIDAYS.add(LocalDate.of(2026, 9, 26));  // 추석 연휴
+        HOLIDAYS.add(LocalDate.of(2026, 10, 3));  // 개천절
+        HOLIDAYS.add(LocalDate.of(2026, 10, 5));  // 개천절 대체공휴일
+        HOLIDAYS.add(LocalDate.of(2026, 10, 9));  // 한글날
+        HOLIDAYS.add(LocalDate.of(2026, 12, 25)); // 성탄절
+    }
+
     /**
-     * 1. 일괄 수정 및 실시간 전송
+     * 주말 및 공휴일 여부 체크
+     */
+    private boolean isRestDay(LocalDate date) {
+        DayOfWeek day = date.getDayOfWeek();
+        return day == DayOfWeek.SATURDAY || day == DayOfWeek.SUNDAY || HOLIDAYS.contains(date);
+    }
+
+    /**
+     * 1. 일괄 수정 및 실시간 전송 (주말/공휴일 제외 적용)
      */
     @Transactional
     public Map<String, Object> updateAttendanceStatusBatch(String id, String status, LocalDate startDate, LocalDate endDate) {
         if (endDate == null) endDate = startDate;
-        List<LocalDate> dateRange = getDateRange(startDate, endDate);
+        
+        // [수정] 평일(근무일) 리스트만 추출
+        List<LocalDate> dateRange = getDateRange(startDate, endDate).stream()
+                .filter(date -> !isRestDay(date))
+                .collect(Collectors.toList());
+                
         List<Employee> targetEmployees = getTargetEmployees(id);
 
         for (Employee employee : targetEmployees) {
             for (LocalDate date : dateRange) {
                 processSingleUpdate(employee, date, status);
             }
-            // 사원 한 명의 루프가 끝날 때마다 즉시 DB 반영 및 웹소켓 전송
             attendanceRepository.flush(); 
             refreshAndNotify(employee, startDate);
         }
@@ -49,19 +82,23 @@ public class AttendanceAdminService {
     }
 
     /**
-     * 2. 일괄 삭제 및 실시간 전송
+     * 2. 일괄 삭제 및 실시간 전송 (주말/공휴일 제외 적용)
      */
     @Transactional
     public Map<String, Object> deleteAttendanceBatch(String id, LocalDate startDate, LocalDate endDate) {
         if (endDate == null) endDate = startDate;
-        List<LocalDate> dateRange = getDateRange(startDate, endDate);
+        
+        // [수정] 평일(근무일) 리스트만 추출
+        List<LocalDate> dateRange = getDateRange(startDate, endDate).stream()
+                .filter(date -> !isRestDay(date))
+                .collect(Collectors.toList());
+                
         List<Employee> targetEmployees = getTargetEmployees(id);
 
         for (Employee employee : targetEmployees) {
             for (LocalDate date : dateRange) {
                 processSingleDelete(employee, date);
             }
-            // 사원 한 명의 삭제 루프가 끝날 때마다 즉시 DB 반영 및 웹소켓 전송
             attendanceRepository.flush(); 
             refreshAndNotify(employee, startDate);
         }
@@ -103,7 +140,7 @@ public class AttendanceAdminService {
                 setLogData(logData, status, 0, 0);
                 break;
         }
-        attendanceRepository.save(logData); // saveAndFlush는 루프 밖에서 호출
+        attendanceRepository.save(logData);
     }
 
     private void processSingleDelete(Employee employee, LocalDate date) {
@@ -137,7 +174,6 @@ public class AttendanceAdminService {
     }
 
     private void refreshAndNotify(Employee employee, LocalDate date) {
-        // 사원 정보 다시 로드 (잔여 연차 등 업데이트 반영)
         Employee updated = employeeRepository.findById(employee.getId()).orElse(employee);
         long newSalary = calculateMonthlySalary(updated.getId(), date.getYear(), date.getMonthValue());
         sendWebSocketUpdate(updated.getId(), date, updated, newSalary);
@@ -162,13 +198,12 @@ public class AttendanceAdminService {
         Map<String, Object> payload = new HashMap<>();
         payload.put("type", "ADMIN_UPDATE");
         payload.put("employeeId", employeeId);
-        payload.put("date", date.toString()); // 변경 기준일
+        payload.put("date", date.toString());
         payload.put("remainingLeave", employee.getAnnualLeave());
         payload.put("remainingSickLeave", employee.getSickLeave());
         payload.put("monthlyLogs", monthlyLogs);
         payload.put("newTotalSalary", salary);
 
-        // 메시지 전송
         this.messagingTemplate.convertAndSend("/topic/attendance/" + employeeId, (Object) payload);
         this.messagingTemplate.convertAndSend("/topic/attendance/admin", (Object) payload);
         
