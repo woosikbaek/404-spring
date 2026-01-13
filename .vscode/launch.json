@@ -9,6 +9,16 @@
       "projectName": "chat-service",
       "args": "",
       "envFile": "${workspaceFolder}/.env"
+    },
+    {
+      "type": "java",
+      "name": "Spring Boot-ChatServiceApplication<hr-service>",
+      "request": "launch",
+      "cwd": "${workspaceFolder}",
+      "mainClass": "com.example.hr_service.ChatServiceApplication",
+      "projectName": "hr-service",
+      "args": "",
+      "envFile": "${workspaceFolder}/.env"
     }
   ]
 }
