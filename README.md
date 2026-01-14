@@ -2,6 +2,16 @@
 
 실시간 IoT 센서와 AI 카메라를 활용한 자동차 품질 검사 시스템 및 근태/채팅 관리 시스템입니다.
 
+# 404found 2차 프로젝트
+> **프로젝트의 모든 과정을 담은 상세 시연 영상입니다.** > 이미지 또는 버튼을 클릭하면 유튜브 페이지로 이동합니다.
+<div align="center">
+  <a href="https://www.youtube.com/watch?v=gPBmVkVSfhc">
+    <img src="https://img.youtube.com/vi/gPBmVkVSfhc/maxresdefault.jpg" width="80%" alt="404found 2차 프로젝트 시연영상">
+    <br>
+    <img src="https://img.shields.io/badge/YouTube-Watch_Video-red?style=for-the-badge&logo=youtube" alt="Youtube Button">
+  </a>
+</div>
+
 ## 📋 목차
 
 - [프로젝트 개요](#프로젝트-개요)
