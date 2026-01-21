@@ -215,3 +215,8 @@ spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver
 
 # JPA 설정
 spring.jpa.hibernate.ddl-auto=update
+
+```
+
+## ERD 구조
+- [ERD Cloud](https://www.erdcloud.com/d/rfbhh56TFNjiobguv)
